@@ -24,7 +24,7 @@
 - RC: ResourceClaim — a Kubernetes object requesting specific devices for a single workload instance
 - RCT: ResourceClaimTemplate — a Kubernetes object that generates a per-VM ResourceClaim, required for live migration of VMs with DRA-backed devices
 - ODC: OvsDpdkConfig — the CRD used to configure the OVS-DPDK DRA driver ([definition](https://github.com/k8snetworkplumbingwg/dra-driver-ovsdpdk/#ovsdpdkconfig-cluster-scoped))
-- ODRP: OvsDpdkResourcePolicy — the CRD that maps OVS-DPDK bridges to DRA-allocatable resources ([definition](https://github.com/k8snetworkplumbingwg/dra-driver-ovsdpdk/#ovsdpdkresourcepolicy-namespaced))
+- ODRP: OvsDpdkResourcePolicy — a CRD that map each OVS-DPDK bridge (as DRA-allocatable resource) on a node ([definition](https://github.com/k8snetworkplumbingwg/dra-driver-ovsdpdk/#ovsdpdkresourcepolicy-namespaced))
 - Also note that when not explicitly mentioned otherwise, the term "device plugin" refers to the OVS-DPDK device plugin.
 
 ### **Feature Overview**
@@ -57,11 +57,11 @@ Performance-intensive VM workloads require network throughput and latency that t
 
 - [x] **Acceptance Criteria**
   - *List the acceptance criteria:*
-    1. A VM with OVS DPDK network binding device starts successfully and has connectivity through the assigned device.
-    2. A VM with OVS DPDK network binding device can be live-migrated (limited to binding using ResourceClaimTemplate); an active connection established before migration is maintained and restored after migration completes, and the VM is reachable on the destination node.
-    3. The live migration request for a VM using a direct ResourceClaim is rejected at admission or scheduling time with a clear error, confirmed by the synchronous API error response (for admission-time rejection) or by a Warning event on the VMI (for scheduling-time rejection). Execution-time behavior is not validated for TP due to test-safety constraints.
-    4. A VM interface that references a DRA network source but has no network binding plugin configured is rejected at admission time with a clear error.
-    5. VMs with OVS-DPDK network devices on a bridge configured with a non-default MTU can exchange traffic using the full jumbo-frame payload size, with no fragmentation.
+    1. A VM with OVS DPDK network binding plugin starts successfully and has connectivity through the assigned device.
+    2. A VM with OVS DPDK network binding plugin can be live-migrated (limited to binding using ResourceClaimTemplate); an active connection established before migration is maintained and restored after migration completes, and the VM is reachable on the destination node.
+    3. VMs with OVS-DPDK network devices on a bridge configured with a non-default MTU can exchange traffic using the full jumbo-frame payload size, with no fragmentation.
+    4. A VM with two OVS-DPDK network interfaces, each backed by a separate device-class request within the same ResourceClaim, starts successfully and has connectivity through both interfaces.
+    5. Two VMs each requesting a device from a different OVS-DPDK device class can be co-scheduled on the same node and exchange traffic with each other.
   - *Note any gaps or missing criteria:* None for TP scope.
 
 - [x] **Non-Functional Requirements (NFRs)**
@@ -88,9 +88,6 @@ Performance-intensive VM workloads require network throughput and latency that t
 - **Multiple devices per claim:** Allocating multiple network devices via a single ResourceClaim or ResourceClaimTemplate (count > 1) has not been validated and is not a supported configuration.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
-- **MAC address configuration:** MAC address specification for OVS DPDK network interfaces is outside the scope of this feature; MAC assignment is the responsibility of the DRA driver or binding plugin.
-  - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
-
 - **DPDK applications inside VMs:** Running DPDK workloads inside a VM (vfio passthrough of the vhost-user device) requires vIOMMU and hugepages.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
@@ -100,7 +97,6 @@ Performance-intensive VM workloads require network throughput and latency that t
   - *Key takeaways and concerns:*
     - DRA replaces the traditional device-plugin approach: users describe the network device they need using Kubernetes resource claim objects (ResourceClaim or ResourceClaimTemplate), and the Kubernetes scheduler allocates devices with full awareness of device constraints and placement requirements.
     - Once the DRA driver provisions the device, a network binding plugin configures the VM's network interface. KubeVirt orchestrates between the DRA driver and the binding plugin.
-    - The TP phase validates OVS-DPDK integration only.
     - A feature gate gates all new API surface; disabling the gate rejects any DRA network source at admission time.
     - Rollback from an enabled feature gate requires removing all VMs using DRA network devices before disabling the gate.
 
@@ -113,7 +109,7 @@ Performance-intensive VM workloads require network throughput and latency that t
 
 - [x] **API Extensions**
   - *List new or modified APIs:* A new DRA network source type is added to the VM network configuration API. Users reference their DRA resource claims from the VM spec using the new source type. A feature gate controls availability of this new source type.
-  - *Testing impact:* Test scenarios cover both valid DRA network configurations and invalid ones (rejected by admission webhooks). Existing tests for Multus-based networks are unaffected.
+  - *Testing impact:* Test scenarios cover both valid DRA network configurations and invalid ones (except for cases that are designed to be rejected by admission webhooks, which are covered in unit-tests). Existing tests for Multus-based networks are unaffected.
 
 - [x] **Test Environment Needs**
   - *See environment requirements in Section II.3 and testing tools in Section II.3.1*
@@ -130,16 +126,11 @@ Performance-intensive VM workloads require network throughput and latency that t
 
 - **[P0]** Verify that a VM can be created with an OVS-DPDK backing network device driver (allocated via ResourceClaimTemplate) with a network binding plugin and establish connectivity through the assigned device.
 - **[P0]** Verify that a VM with a ResourceClaimTemplate-backed OVS-DPDK DRA network device can be live-migrated between nodes with an active connection maintained or re-established after migration completes.
-- **[P0]** Verify that the live migration request for a VM with a direct ResourceClaim-backed network device is rejected at admission or scheduling time with a clear error message, confirmed by inspecting the rejection event.
-- **[P0]** Verify that when referencing a non-existing ResourceClaimTemplate, the VM does not start with a partially configured interface, and reports a clear allocation failure.
-- **[P1]** Verify that a VM can be created with an OVS-DPDK network device allocated via direct ResourceClaim with a network binding plugin and establish connectivity through the assigned device.
 - **[P1]** Verify that a VM with two DRA-backed OVS-DPDK vhost-user interfaces (each from a separate ResourceClaimTemplate) can be created and traffic flows independently on each interface.
 - **[P1]** Verify that when the OVS-DPDK backing driver is restarted, VMs with existing vhost-user ports remain functional and new VMs backed by the network device can be created.
-- **[P1]** Verify that when a VM with an OVS-DPDK network device is deleted, the device is released and a subsequent VM requesting a device on the same node can acquire and use one successfully — confirming the device was freed from the DRA perspective.
-- **[P1]** Verify that VMs with OVS-DPDK network binding devices on a bridge with non-default MTU can send traffic with jumbo frames between each other, with no fragmentation.
-- **[P1]** Verify that VM specs mixing DRA and Multus-based network sources on the same VM are rejected at admission time with a clear error.
-- **[P1]** Verify that a VM interface configured with a DRA network source but without a network binding plugin is rejected at admission time with a clear error.
-- **[P1]** Verify that VM specs with invalid DRA network configuration (empty or missing claim name or request name, or two networks referencing the same claimName+requestName combination) are rejected at admission time.
+- **[P1]** Verify that VMs with OVS-DPDK network binding plugin on a bridge with non-default MTU can send traffic with jumbo frames between each other, with no fragmentation.
+- **[P1]** Verify that a VM with two OVS-DPDK network interfaces, each backed by a separate device-class request within the same ResourceClaim, starts successfully and has connectivity through both interfaces.
+- **[P1]** Verify that two VMs each requesting a device from a different OVS-DPDK device class can be co-scheduled on the same node and exchange traffic with each other.
 - **[P2]** Verify that VMs with OVS-DPDK network devices can be live-migrated with connectivity preserved after the OVS-DPDK backing driver has been restarted on both source and destination nodes.
 - **[P2]** Verify that two VMs on different nodes, each allocated an OVS-DPDK-backing network device from the same DeviceClass via separate ResourceClaimTemplates, can start and communicate over their respective network interfaces.
 - **[P2]** Verify that a VM with a ResourceClaimTemplate-backed network device driver remains functional after an OCP minor-version upgrade; connectivity is re-established after the upgrade completes.
@@ -154,7 +145,7 @@ Performance-intensive VM workloads require network throughput and latency that t
   - *Rationale:* Exposing OVS-DPDK resources via the legacy Device Plugin for NUMA-aware pod/VM scheduling is a separate mechanism from DRA. It requires bare-metal with dual-NUMA nodes. This STP covers DRA-based device consumption only.
   - *PM/Lead Agreement:* Ronen Sde-Or / 2026-Sep-06
 
-- **Un-supported live migration failure path - the destination node cannot allocate the OVS-DPDK device required by the ResourceClaimTemplate**
+- **Live migration failure path - the destination node cannot allocate the OVS-DPDK device required by the ResourceClaimTemplate**
   - *Rationale:* The nodes configuration is set on deployment time and not changed on day-2, and is similar on all nodes. This STP covers scenarios under the assumption of fixed, similar nodes configurations.
   - *PM/Lead Agreement:* Ronen Sde-Or / 2026-Sep-08
 
@@ -168,7 +159,7 @@ Performance-intensive VM workloads require network throughput and latency that t
 **Functional**
 
 - [x] **Functional Testing** — Validates that the feature works according to specified requirements and user stories
-  - *Details:* Validate VM creation with OVS-DPDK network devices (via RC and RCT), connectivity establishment, live migration with RCT-backed devices, and admission-time rejection of invalid configurations.
+  - *Details:* Validate VM creation with OVS-DPDK network devices (via RC and RCT), connectivity establishment, and live migration with RCT-backed devices.
 
 - [x] **Automation Testing** — Confirms test automation plan is in place for CI and regression coverage (all tests are expected to be automated)
   - *Details:* All new test scenarios will be automated. A dedicated CI lane is required due to OVS-DPDK hardware and driver setup requirements; the standard shared lane cannot be used without driver setup (see Section II.3.1).
@@ -188,7 +179,7 @@ Performance-intensive VM workloads require network throughput and latency that t
   - *Details:* Not applicable for TP phase; no scale requirements defined. The feature follows the existing DRA scalability model.
 
 - [ ] **Security Testing** — Verifies security requirements, RBAC, authentication, authorization, and vulnerability scanning
-  - *Details:* Not applicable; no new RBAC or authentication changes introduced. Webhook admission validation is exercised as part of Functional Testing (invalid config rejection scenarios).
+  - *Details:* Not applicable; no new RBAC or authentication changes introduced. Webhook admission validation for invalid DRA network configurations is covered by unit tests in the KubeVirt codebase (see [CNV-97357](https://redhat.atlassian.net/browse/CNV-97357)).
 
 - [ ] **Usability Testing** — Validates user experience and accessibility requirements
   - *Details:* Not applicable. Feature is API-driven; no new UI components or CLI commands introduced. UI team confirmed no testing required for TP phase.
@@ -261,7 +252,7 @@ The following conditions must be met before testing can begin:
 **Test Coverage**
 
 - **Risk:** Testing is scoped to OVS-DPDK as the only concrete DRA network driver for this release. Other DRA network drivers, if introduced in future releases, will require separate test coverage.
-  - **Mitigation:** Design test assertions against user-observable outcomes (connectivity, migration success, admission rejection) rather than OVS-DPDK-specific internals, so tests remain applicable to future drivers.
+  - **Mitigation:** Design test assertions against user-observable outcomes (connectivity, migration success) rather than OVS-DPDK-specific internals, so tests remain applicable to future drivers.
   - *Areas with reduced coverage:* Any DRA network driver type other than OVS-DPDK.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
@@ -270,13 +261,6 @@ The following conditions must be met before testing can begin:
 - **Risk:** The bare-metal cluster requires DPDK-capable physical NICs, IOMMU, and hugepages configuration. Environment provisioning is complex and depends on infrastructure team support and hardware availability.
   - **Mitigation:** Environment setup is treated as a day-0 activity tracked under CNV-96151. Hardware requirements are documented explicitly so provisioning can start early.
   - *Missing resources or infrastructure:* Bare-metal cluster with DPDK-capable NICs required; tracked under CNV-96151.
-  - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
-
-**Untestable Aspects**
-
-- **Risk:** Validating that live migration of a VM with a direct ResourceClaim-backed DRA device (an unsupported scenario) fails safely is difficult without risking VM corruption during testing.
-  - **Mitigation:** Limit testing to verifying observable rejection or clear failure at the admission or scheduling layer. Avoid driving the migration path for this unsupported configuration into states that could harm the workload.
-  - *Reason untestable and mitigation approach:* The migration path for RC-backed devices may not fail cleanly at all layers; testing deeply may result in workload loss. Testing at the admission/scheduling boundary is sufficient to confirm the non-goal is enforced.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
 **Resource Constraints**
@@ -301,21 +285,17 @@ The following conditions must be met before testing can begin:
 |:-----------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:-----|:---------|
 | CNV-88618 (epic) | As a VM owner, I want to attach OVS-DPDK-managed network devices to my VM using a ResourceClaimTemplate so I can consume them the same way I would in a container workload | Verify that a VM created with a ResourceClaimTemplate-backed OVS-DPDK network device and a network binding plugin starts successfully and has network connectivity through the assigned device | Tier 1 | P0 |
 |                  | As a VM owner, I want two VMs with OVS-DPDK-managed network devices to be able to communicate with each other                                                              | Verify that two VMs with ResourceClaimTemplate-backed OVS-DPDK network devices can ping and exchange traffic with each other | Tier 1 | P0 |
-|                  | As a VM owner, I want a clear failure reported when referencing a false ResourceClaimTemplate, so my VM does not start with a partially configured interface               | Create a VM that references a non-existing ResourceClaimTemplate; verify that the VM does not reach Running, and no usable OVS-DPDK interface is attached                                                  | Tier 1 | P0 |
-| AC #4            | As a cluster admin, I want live migration of RC-backed VMs to be safely rejected before any disruptive action is taken                                                     | Verify that a live migration request for a VM backed by a direct ResourceClaim is rejected at admission or scheduling time with a clear error, confirmed by the synchronous API error response or Warning event on the VMI                                                                              | Tier 1 | P0 |
 |                  | As a VM owner, I want to live-migrate my VM with a OVS-DPDK-managed network device so I can perform maintenance without VM downtime                                        | Verify that a VM with a ResourceClaimTemplate-backed OVS-DPDK network device can be live-migrated between nodes; an active connection established before migration is maintained or re-established within normal migration bounds after migration completes, and the VM is reachable on the destination node   | Tier 2 | P0 |
 |                  | As a VM owner, I want to attach OVS-DPDK-managed network devices to my VM using a direct ResourceClaim so I can consume them the same way I would in a container workload  | Verify that a VM created with a direct ResourceClaim-backed OVS-DPDK network device and a network binding plugin starts successfully and has network connectivity through the assigned device                                                                                                                  | Tier 1 | P1 |
-|                  | As a VM owner, I want a clear error when I accidentally mix DRA and Multus-based sources on the same VM                                                                    | Verify that a VM spec mixing DRA and Multus-based network sources is rejected at admission time with a clear error                                                                                                                                                                                      | Tier 1 | P1 |
-| AC #5            | As a VM owner, I want a clear error when my DRA network interface has no binding plugin configured                                                                         | Verify that a VM interface configured with a DRA network source but without a network binding plugin is rejected at admission time with a clear error                                                                                                                                                   | Tier 1 | P1 |
-| AC #6            | As a VM owner, I want jumbo-frame traffic to traverse my OVS-DPDK interface without fragmentation                                                                          | Verify that two VMs with OVS-DPDK network devices on a bridge configured with a non-default MTU can exchange traffic using the full jumbo-frame payload size with no fragmentation                                                                                                                     | Tier 1 | P1 |
+| AC #3            | As a VM owner, I want jumbo-frame traffic to traverse my OVS-DPDK interface without fragmentation                                                                          | Verify that two VMs with OVS-DPDK network devices on a bridge configured with a non-default MTU can exchange traffic using the full jumbo-frame payload size with no fragmentation                                                                                                                     | Tier 1 | P1 |
 |                  | As a VM owner, I want to attach two independent high-performance network interfaces to my VM                                                                               | Verify that a VM with two DRA-backed OVS-DPDK vhost-user interfaces (each from a separate ResourceClaimTemplate) starts successfully and traffic flows independently on each interface                                                                                                                 | Tier 1 | P1 |
-|                  | As a VM owner, I want my deleted VM to fully release its network device so other VMs can use it                                                                            | Verify that after deleting a VM with an OVS-DPDK network device, a subsequent VM requesting a device on the same node can acquire and use one successfully — confirming the device was released from the DRA perspective                                                                               | Tier 1 | P1 |
+| AC #4            | As a VM owner, I want to attach two OVS-DPDK network interfaces from different device classes to my VM using a single ResourceClaim                                        | Verify that a VM with two OVS-DPDK network interfaces, each backed by a separate device-class request within the same ResourceClaim, starts successfully and has connectivity through both interfaces                                                                                                   | Tier 1 | P1 |
+| AC #5            | As a VM owner, I want VMs using different OVS-DPDK device classes to coexist on the same node and communicate with each other                                             | Verify that two VMs each requesting a device from a different OVS-DPDK device class are co-scheduled on the same node and can exchange traffic with each other                                                                                                                                        | Tier 1 | P1 |
 |                  | As a VM owner, I want my existing VM's network to recover if the backing driver is restarted                                                                               | Verify that after restarting the OVS-DPDK backing driver, VMs with existing vhost-user ports remain reachable | Tier 2 | P1 |
 |                  | As a VM owner, I want to create new VMs with OVS-DPDK network devices after the backing driver is restarted                                                                | Verify that after restarting the OVS-DPDK backing driver, new VMs backed by the network device can be created and achieve connectivity | Tier 2 | P1 |
 |                  | As a VM owner, I want my DRA-backed network device to remain usable after a cluster upgrade                                                                                | Verify that a VM with a ResourceClaimTemplate-backed OVS-DPDK network device remains running after an OCP minor-version upgrade and network connectivity can be re-established after the upgrade completes                                                                                                 | Tier 2 | P2 |
 |                  | As a VM owner, I want to live-migrate my VM even after the backing driver was restarted                                                                                    | Verify that a VM with an OVS-DPDK RCT-backed network device can be live-migrated with connectivity preserved after the OVS-DPDK backing driver has been restarted on both source and destination nodes                                                                                                | Tier 2 | P2 |
 |                  | As a VM owner, I want VMs on different nodes sharing the same DeviceClass to each get an independent OVS-DPDK device and communicate with each other                       | Verify that two VMs on different nodes, each with a ResourceClaimTemplate-backed OVS-DPDK network device from the same DeviceClass, start successfully and can exchange traffic over their respective interfaces                                                                                       | Tier 2 | P2 |
-|                  | As a VM owner, I want admission to clearly reject invalid DRA network configurations before my VM starts                                                                   | Verify that VM specs with invalid DRA network configuration — empty or missing claim name, missing request name, or two interfaces referencing the same claimName+requestName combination — are rejected at admission time with a descriptive error                                                   | Tier 1 | P1 |
 
 ---
 
