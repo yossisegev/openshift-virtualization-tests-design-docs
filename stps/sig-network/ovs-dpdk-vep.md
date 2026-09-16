@@ -25,7 +25,7 @@
 - RCT: ResourceClaimTemplate — a Kubernetes object that generates a per-VM ResourceClaim, required for live migration of VMs with DRA-backed devices
 - ODC: OvsDpdkConfig — the CRD used to configure the OVS-DPDK DRA driver ([definition](https://github.com/k8snetworkplumbingwg/dra-driver-ovsdpdk/#ovsdpdkconfig-cluster-scoped))
 - ODRP: OvsDpdkResourcePolicy — a CRD that map each OVS-DPDK bridge (as DRA-allocatable resource) on a node ([definition](https://github.com/k8snetworkplumbingwg/dra-driver-ovsdpdk/#ovsdpdkresourcepolicy-namespaced))
-- Also note that when not explicitly mentioned otherwise, the term "device plugin" refers to the OVS-DPDK device plugin.
+- Also note that when not explicitly mentioned otherwise, the term "network plugin" refers to the OVS-DPDK network binding plugin.
 
 ### **Feature Overview**
 
@@ -88,8 +88,8 @@ Performance-intensive VM workloads require network throughput and latency that t
 - **Multiple devices per claim:** Allocating multiple network devices via a single ResourceClaim or ResourceClaimTemplate (count > 1) has not been validated and is not a supported configuration.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
-- **DPDK applications inside VMs:** Running DPDK workloads inside a VM (vfio passthrough of the vhost-user device) requires vIOMMU and hugepages.
-  - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
+- **Interface link-state management:** Setting the interface link-state via the VM spec (`vm.spec.template.spec.domain.devices.interfaces[].state`) is not supported for OVS-DPDK network devices.
+  - *Sign-off:* [Name / @github-handle] / [Date]
 
 #### **3. Technology and Design Review**
 
@@ -104,7 +104,7 @@ Performance-intensive VM workloads require network throughput and latency that t
   - *List identified challenges:*
     - Testing requires a functional external OVS-DPDK DRA driver. Setting up OVS-DPDK as a DRA driver involves significant infrastructure configuration (hugepages, OVS configuration, DPDK-capable NICs or software equivalent).
     - The OVS-DPDK DRA driver setup is applied at cluster deployment time (day-0). This approach was selected to ensure environment consistency across test runs; see CNV-96151 for the CI lane implementation tracking issue.
-    - The feature requires Kubernetes 1.34+ for network binding plugin support. OCP 5.1, which is based on Kubernetes 1.37, meets this version requirement.
+    - The feature requires Kubernetes 1.34+ for exposing device metadata from the DRA driver to the containers that need it, and accessing it (as detailed in https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/dra-observability/#device-metadata). OCP 5.1, which is based on Kubernetes 1.37, meets this version requirement.
   - *Impact on testing approach:* Tests require a dedicated environment with the OVS-DPDK DRA driver deployed and validated before test execution. A standard shared CI lane is not suitable without driver setup; a dedicated CI lane is needed.
 
 - [x] **API Extensions**
@@ -134,6 +134,7 @@ Performance-intensive VM workloads require network throughput and latency that t
 - **[P2]** Verify that VMs with OVS-DPDK network devices can be live-migrated with connectivity preserved after the OVS-DPDK backing driver has been restarted on both source and destination nodes.
 - **[P2]** Verify that two VMs on different nodes, each allocated an OVS-DPDK-backing network device from the same DeviceClass via separate ResourceClaimTemplates, can start and communicate over their respective network interfaces.
 - **[P2]** Verify that a VM with a ResourceClaimTemplate-backed network device driver remains functional after an OCP minor-version upgrade; connectivity is re-established after the upgrade completes.
+- **[P2]** Verify that a VM with an OVS-DPDK network device retains connectivity after a guest reboot.
 
 **Out of Scope (Testing Scope Exclusions)**
 
@@ -141,8 +142,8 @@ Performance-intensive VM workloads require network throughput and latency that t
   - *Rationale:* No performance requirements are defined for the TP phase; performance validation is deferred to GA, and is anyway owned by the dedicated performance team and is outside this team's scope.
   - *PM/Lead Agreement:* Ronen Sde-Or / 2026-Sep-06
 
-- **Device Plugin NUMA-aware scheduling for OVS-DPDK resources**
-  - *Rationale:* Exposing OVS-DPDK resources via the legacy Device Plugin for NUMA-aware pod/VM scheduling is a separate mechanism from DRA. It requires bare-metal with dual-NUMA nodes. This STP covers DRA-based device consumption only.
+- **Scheduling of non-DRA NUMA-aware plugin for OVS-DPDK resources**
+  - *Rationale:* Exposing OVS-DPDK resources via the legacy device binding plugin for NUMA-aware pod/VM scheduling is a separate mechanism from DRA. It requires bare-metal with dual-NUMA nodes. This STP covers DRA-based device consumption only.
   - *PM/Lead Agreement:* Ronen Sde-Or / 2026-Sep-06
 
 - **Live migration failure path - the destination node cannot allocate the OVS-DPDK device required by the ResourceClaimTemplate**
@@ -151,7 +152,7 @@ Performance-intensive VM workloads require network throughput and latency that t
 
 **Test Limitations**
 
-- **DPDK applications inside VMs:** Testing DPDK workloads inside VMs (vfio passthrough of the vhost-user device) requires vIOMMU and hugepages, hence testing is limited to QE bare-metal clusters. This use case is documented in Known Limitations (Section I.2).
+- **DPDK applications inside VMs:** Running DPDK workloads inside a VM (vfio passthrough of the vhost-user device) requires vIOMMU and hugepages, hence testing is limited to QE bare-metal clusters.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
 #### **2. Test Strategy**
@@ -190,16 +191,16 @@ Performance-intensive VM workloads require network throughput and latency that t
 **Integration & Compatibility**
 
 - [x] **Compatibility Testing** — Ensures feature works across supported platforms, versions, and configurations
-  - *Details:* Validate that the feature gate can be toggled between enabled and disabled. Existing Multus-based VM tests run as regression to confirm no impact from enabling the feature gate. Confirm the Kubernetes 1.34+ version requirement is met in OCP 5.1.
+  - *Details:* Validate that the feature gate can be toggled between enabled and disabled. Existing Multus-based VM tests run as regression to confirm no impact from enabling the feature gate.
 
-- [x] **Upgrade Testing** — Validates upgrade paths from previous versions, data migration, and configuration preservation
+- [x] **Upgrade Testing** — Validates upgrade paths from previous versions (starting from 5.1), data migration, and configuration preservation
   - *Details:* Validate that a VM with an RCT-backed network device remains functional after an OCP minor-version upgrade with connectivity re-established after the upgrade (see P2 testing goal).
 
 - [x] **Dependencies** — Blocked by deliverables from other components/products
-  - *Details:* Testing depends on a stable external OVS-DPDK DRA driver being available for QE use. Network binding plugin must be registered and functional before test execution begins. Track driver and binding plugin readiness against the CNV-88618 epic.
+  - *Details:* Testing depends on a stable external OVS-DPDK DRA driver being available for QE use. Network binding plugin must be registered and functional before test execution begins. OVS must function properly as the base for OVS DPDK. Track driver and binding plugin readiness against the CNV-88618 epic.
 
 - [x] **Cross Integrations** — Does the feature affect other features or require testing by other teams?
-  - *Details:* The network binding plugin team must validate correct integration with DRA device attributes. The live migration flow is affected; any regressions in VM scheduling or migration with DRA devices must be caught during testing.
+  - *Details:* The integration is with the DRA device, the coverage suggested in this STP will cover that (by the network team). The live migration flow is affected and will also be covered by the network tests; any regressions in VM scheduling or migration with DRA devices must be caught during testing.
 
 **Infrastructure**
 
@@ -211,7 +212,7 @@ Performance-intensive VM workloads require network throughput and latency that t
 **Environment — Bare-metal cluster (all tests)**
 
 - **Cluster Topology:** 3-master/3-worker bare-metal cluster (either HA or compact); multi-node worker topology required for live migration scenarios
-- **OCP & OpenShift Virtualization Version(s):** OCP 5.1 with OpenShift Virtualization 5.1 (Kubernetes server version ≥ 1.34)
+- **OCP & OpenShift Virtualization Version(s):** OCP 5.1 with OpenShift Virtualization 5.1 (assures Kubernetes server version ≥ 1.34)
 - **CPU:** Hardware virtualization enabled (VT-x / AMD-V); IOMMU enabled (VT-d / AMD-Vi) on all worker nodes
 - **Compute Resources:** Minimum per worker node: 32 physical CPUs, 64 GB RAM; hugepages configured for OVS-DPDK
 - **Special Hardware:** DPDK-capable physical NICs on worker nodes; dual-NUMA node topology available on workers
@@ -235,10 +236,10 @@ Performance-intensive VM workloads require network throughput and latency that t
 The following conditions must be met before testing can begin:
 
 - [ ] Requirements and design documents are **approved and merged**
-- [ ] OCP 5.1 Kubernetes server version confirmed ≥ 1.34 (verified via `kubectl version`)
+- [ ] OCP 5.1 version confirmed (which necessarily assures Kubernetes server version ≥ 1.34)
 - [ ] Test environment is **set up and configured** with OVS-DPDK DRA driver deployed and functional (see Section II.3)
 - [ ] `NetworkDevicesWithDRA` feature gate is available and can be toggled in the test cluster
-- [ ] Network binding plugin is registered for the OVS-DPDK device type
+- [ ] Network binding plugin is registered for the OVS-DPDK device type in the HCO CR
 
 #### **5. Risks**
 
@@ -266,7 +267,7 @@ The following conditions must be met before testing can begin:
 **Resource Constraints**
 
 - **Risk:** Setting up and maintaining the OVS-DPDK DRA driver configuration on the bare-metal cluster requires cross-team expertise spanning OVS-DPDK and KubeVirt DRA. Insufficient expertise within QE may slow environment setup and test development.
-  - **Mitigation:** Coordinate with the development team for environment setup assistance during the initial test development phase. Document the setup procedure (ODC/ODRP configuration, driver deployment) to reduce ongoing dependency.
+  - **Mitigation:** Coordinate with the DevOps team for environment setup assistance during the initial test development phase. Document the setup procedure (ODC/ODRP configuration, driver deployment) to reduce ongoing dependency.
   - *Current capacity gaps:* OVS-DPDK DRA driver operational expertise within QE.
   - *Sign-off:* Ronen Sde-Or / 2026-Sep-06
 
@@ -295,7 +296,8 @@ The following conditions must be met before testing can begin:
 |                  | As a VM owner, I want to create new VMs with OVS-DPDK network devices after the backing driver is restarted                                                                | Verify that after restarting the OVS-DPDK backing driver, new VMs backed by the network device can be created and achieve connectivity | Tier 2 | P1 |
 |                  | As a VM owner, I want my DRA-backed network device to remain usable after a cluster upgrade                                                                                | Verify that a VM with a ResourceClaimTemplate-backed OVS-DPDK network device remains running after an OCP minor-version upgrade and network connectivity can be re-established after the upgrade completes                                                                                                 | Tier 2 | P2 |
 |                  | As a VM owner, I want to live-migrate my VM even after the backing driver was restarted                                                                                    | Verify that a VM with an OVS-DPDK RCT-backed network device can be live-migrated with connectivity preserved after the OVS-DPDK backing driver has been restarted on both source and destination nodes                                                                                                | Tier 2 | P2 |
-|                  | As a VM owner, I want VMs on different nodes sharing the same DeviceClass to each get an independent OVS-DPDK device and communicate with each other                       | Verify that two VMs on different nodes, each with a ResourceClaimTemplate-backed OVS-DPDK network device from the same DeviceClass, start successfully and can exchange traffic over their respective interfaces                                                                                       | Tier 2 | P2 |
+|                  | As a VM owner, I want VMs on different nodes sharing the same DeviceClass to each get an independent OVS-DPDK device and communicate with each other                       | Verify that two VMs on different nodes, each with a separate ResourceClaim-backed OVS-DPDK network device from the same DeviceClass, start successfully and can exchange traffic over their respective interfaces                                                                                      | Tier 2 | P2 |
+|                  | As a VM owner, I want my OVS-DPDK network device to remain functional after a guest reboot                                                                                 | Verify that a VM with an OVS-DPDK network device retains network connectivity after a guest reboot                                                                                                                                                                                                    | Tier 2 | P2 |
 
 ---
 
